@@ -68,6 +68,8 @@ export class LiveSessionManager {
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private reconnectAttempts: number = 0;
+  private readonly MAX_RECONNECTS = 3;
   
   // Audio playback state
   private playbackContext: AudioContext | null = null;
@@ -85,14 +87,14 @@ export class LiveSessionManager {
   }
 
   private startHeartbeat() {
+    // Heartbeat via audio context keepalive — NOT via sending empty text
+    // (empty text inputs interrupt Naina mid-speech)
+    // The audio stream itself keeps the WebSocket alive
     this.heartbeatInterval = setInterval(() => {
-      if (this.sessionPromise) {
-        // send a silent keepalive text so the connection stays warm
-        this.sessionPromise.then(session => {
-          try { session.sendRealtimeInput({ text: '' }); } catch (_) {}
-        }).catch(() => {});
+      if (this.playbackContext && this.playbackContext.state === 'suspended') {
+        this.playbackContext.resume().catch(() => {});
       }
-    }, 25000);
+    }, 20000);
   }
 
   private stopHeartbeat() {
@@ -104,6 +106,7 @@ export class LiveSessionManager {
 
   async start() {
     try {
+      this.reconnectAttempts = 0; // reset on fresh start
       this.onStateChange("processing");
       
       // Initialize Audio Contexts
@@ -163,7 +166,7 @@ export class LiveSessionManager {
 
       // Connect to Live API
       this.sessionPromise = this.ai.live.connect({
-        model: "gemini-3.1-flash-live-preview",
+        model: "gemini-2.0-flash-live-001",
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -433,23 +436,24 @@ export class LiveSessionManager {
           },
           onclose: (event: any) => {
             console.log("Live API Closed", event);
-            // Only auto-reconnect if session was active (not user-closed)
-            if (this.sessionPromise !== null) {
-              console.warn("Session dropped unexpectedly — attempting reconnect...");
+            if (this.sessionPromise !== null && this.reconnectAttempts < this.MAX_RECONNECTS) {
+              this.reconnectAttempts++;
+              console.warn(`Session dropped — reconnect attempt ${this.reconnectAttempts}/${this.MAX_RECONNECTS}...`);
               this.sessionPromise = null;
               this.onStateChange("processing");
               setTimeout(() => {
                 if (this.mediaStream) {
-                  // Reconnect with fresh key
                   this.ai = new GoogleGenAI({ apiKey: getLiveApiKey() });
-                  this.start().catch(() => {
-                    this.stop();
-                  });
+                  this.start().catch(() => this.stop());
                 } else {
                   this.stop();
                 }
-              }, 2000);
+              }, 2000 * this.reconnectAttempts); // back off: 2s, 4s, 6s
             } else {
+              if (this.reconnectAttempts >= this.MAX_RECONNECTS) {
+                console.warn('Max reconnects reached — stopping session.');
+                this.reconnectAttempts = 0;
+              }
               this.stop();
             }
           },

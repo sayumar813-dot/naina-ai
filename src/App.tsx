@@ -79,7 +79,15 @@ function detectWohLadki(text: string): boolean {
     lower.includes("usse pyaar") ||
     lower.includes("i love her") ||
     lower.includes("she is") ||
-    lower.includes("her name")
+    lower.includes("her name") ||
+    lower.includes("uss ladki") ||
+    lower.includes("woh") && (lower.includes("pyaar") || lower.includes("like her") || lower.includes("beautiful") || lower.includes("cute")) ||
+    lower.includes("girlfriend") ||
+    lower.includes("crush") ||
+    lower.includes("mujhe pasand hai woh") ||
+    lower.includes("usko propose") ||
+    lower.includes("date karna") ||
+    lower.includes("she said")
   );
 }
 
@@ -171,7 +179,7 @@ export default function App() {
     if (detectWohLadki(rawText)) {
       setWohLadkiMentions(prev => {
         const n = prev + 1;
-        setJealousyLevel(Math.min(100, n * 15));
+        setJealousyLevel(Math.min(100, n * 25));
         return n;
       });
       setMood("Moody");
@@ -198,7 +206,7 @@ export default function App() {
     if (detectWohLadki(finalTranscript)) {
       setWohLadkiMentions(prev => {
         const n = prev + 1;
-        setJealousyLevel(Math.min(100, n * 15));
+        setJealousyLevel(Math.min(100, n * 25));
         return n;
       });
     }
