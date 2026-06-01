@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Mic, MicOff, Loader2, Volume2, VolumeX, Keyboard, Send, X, ExternalLink } from "lucide-react";
+import { Mic, MicOff, Loader2, Keyboard, Send, X, ExternalLink } from "lucide-react";
 import { getZoyaResponse, getZoyaAudio, resetZoyaSession } from "./services/geminiService";
 import { processCommand } from "./services/commandService";
 import { LiveSessionManager } from "./services/liveService";
@@ -7,7 +7,10 @@ import { sendSystemControl, parseLocalSystemCommand } from "./services/systemSer
 import Visualizer from "./components/Visualizer";
 import VantaBackground from "./components/VantaBackground";
 import PermissionModal from "./components/PermissionModal";
+import JealousyMeter from "./components/JealousyMeter";
 import { playPCM } from "./utils/audioUtils";
+import { parseAndScheduleReminders } from "./utils/notifications";
+import { type Mood, MOOD_VANTA_COLOR, detectMood } from "./utils/moodConfig";
 import { motion, AnimatePresence } from "motion/react";
 
 type AppState = "idle" | "listening" | "processing" | "speaking";
@@ -65,6 +68,47 @@ function wantsTextOutput(text: string): boolean {
   );
 }
 
+// Detect if "woh ladki" is mentioned to trigger jealousy
+function detectWohLadki(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("woh ladki") ||
+    lower.includes("secret wali") ||
+    lower.includes("woh mysterious") ||
+    lower.includes("us ladki") ||
+    lower.includes("usse pyaar") ||
+    lower.includes("i love her") ||
+    lower.includes("she is") ||
+    lower.includes("her name")
+  );
+}
+
+// Process Naina's response for special tags (weather, reminders)
+async function processResponseTags(text: string, backendUrl: string): Promise<string> {
+  let processed = text;
+
+  // Handle [WEATHER:city] tags
+  const weatherMatches = [...text.matchAll(/\[WEATHER:([^\]]+)\]/g)];
+  for (const match of weatherMatches) {
+    const city = match[1].trim();
+    try {
+      const res = await fetch(`${backendUrl}/api/weather?city=${encodeURIComponent(city)}`);
+      const data = await res.json();
+      const weatherStr = `${data.temp_c}°C, ${data.description}, feels like ${data.feels_like}°C`;
+      processed = processed.replace(match[0], weatherStr);
+    } catch {
+      processed = processed.replace(match[0], `(weather unavailable for ${city})`);
+    }
+  }
+
+  // Handle [REMINDER:mins:message] tags
+  processed = parseAndScheduleReminders(processed);
+
+  return processed;
+}
+
+const BACKEND_URL = process.env.VITE_BACKEND_URL || "http://localhost:5001";
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>("idle");
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
@@ -96,7 +140,51 @@ export default function App() {
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
 
+  // Mood & Jealousy state
+  const [mood, setMood] = useState<Mood>("Normal");
+  const [jealousyLevel, setJealousyLevel] = useState(0);
+  const [wohLadkiMentions, setWohLadkiMentions] = useState(0);
+
+  // Vanta background ref for mood-reactive color changes
+  const vantaRef = useRef<any>(null);
+
+  // Update Vanta color when mood changes
+  useEffect(() => {
+    if (vantaRef.current) {
+      try {
+        vantaRef.current.setOptions({ color: MOOD_VANTA_COLOR[mood] });
+      } catch (_) {}
+    }
+  }, [mood]);
+
+  // Auto night mode based on time
+  useEffect(() => {
+    const hour = new Date().getHours();
+    if (hour >= 23 || hour < 5) setMood("Night");
+  }, []);
+
   const liveSessionRef = useRef<LiveSessionManager | null>(null);
+
+  // Handle any Naina response — detect jealousy triggers, mood shifts, tags
+  const handleNainaResponse = useCallback(async (rawText: string): Promise<string> => {
+    // Detect woh ladki mentions
+    if (detectWohLadki(rawText)) {
+      setWohLadkiMentions(prev => {
+        const n = prev + 1;
+        setJealousyLevel(Math.min(100, n * 15));
+        return n;
+      });
+      setMood("Moody");
+    } else {
+      // Detect mood from response text
+      const detectedMood = detectMood(rawText);
+      if (detectedMood) setMood(detectedMood);
+    }
+
+    // Process special tags
+    const processed = await processResponseTags(rawText, BACKEND_URL);
+    return processed;
+  }, []);
 
   const handleTextCommand = useCallback(async (finalTranscript: string) => {
     if (!finalTranscript.trim()) {
@@ -106,7 +194,15 @@ export default function App() {
 
     const userWantsText = wantsTextOutput(finalTranscript);
 
-    // Save to memory (hidden from screen)
+    // Check user message for woh ladki too
+    if (detectWohLadki(finalTranscript)) {
+      setWohLadkiMentions(prev => {
+        const n = prev + 1;
+        setJealousyLevel(Math.min(100, n * 15));
+        return n;
+      });
+    }
+
     setMessages((prev) => [...prev, { id: Date.now().toString(), sender: "user", text: finalTranscript }]);
 
     if (isSessionActive && liveSessionRef.current) {
@@ -116,7 +212,7 @@ export default function App() {
 
     setAppState("processing");
 
-    // 0. Check for local system control commands (open app, volume, screenshot, etc.)
+    // Check for local system control commands
     const localSystemCmd = parseLocalSystemCommand(finalTranscript);
     if (localSystemCmd) {
       const responseText = localSystemCmd.feedback;
@@ -143,8 +239,6 @@ export default function App() {
     if (commandResult.isBrowserAction) {
       responseText = commandResult.action;
       setMessages((prev) => [...prev, { id: Date.now().toString() + "-z", sender: "zoya", text: responseText, url: commandResult.url }]);
-
-      // Show text card with link button always for browser actions
       setTextCard({ text: responseText, url: commandResult.url });
 
       if (!isMuted) {
@@ -157,10 +251,10 @@ export default function App() {
       if (commandResult.url) openUrl(commandResult.url);
 
     } else {
-      responseText = await getZoyaResponse(finalTranscript, messagesRef.current);
+      const rawResponse = await getZoyaResponse(finalTranscript, messagesRef.current);
+      responseText = await handleNainaResponse(rawResponse);
       setMessages((prev) => [...prev, { id: Date.now().toString() + "-z", sender: "zoya", text: responseText }]);
 
-      // Only show text card if user asked for it
       if (userWantsText) {
         setTextCard({ text: responseText });
       }
@@ -172,7 +266,7 @@ export default function App() {
       }
       setAppState("idle");
     }
-  }, [isMuted, isSessionActive]);
+  }, [isMuted, isSessionActive, handleNainaResponse]);
 
   useEffect(() => {
     return () => { liveSessionRef.current?.stop(); };
@@ -196,19 +290,38 @@ export default function App() {
 
         session.onStateChange = (state) => setAppState(state);
 
-        session.onMessage = (sender, text) => {
-          setMessages((prev) => [...prev, { id: Date.now().toString() + "-" + sender, sender, text }]);
-          // For live mode: show text card only if Zoya's response is long (likely text-worthy)
-          // or if the last user message asked for text
-          const lastUserMsg = messagesRef.current.filter(m => m.sender === "user").slice(-1)[0];
-          if (sender === "zoya" && lastUserMsg && wantsTextOutput(lastUserMsg.text)) {
-            setTextCard({ text });
+        session.onMessage = async (sender, text) => {
+          if (sender === "zoya") {
+            const processed = await handleNainaResponse(text);
+            setMessages((prev) => [...prev, { id: Date.now().toString() + "-" + sender, sender, text: processed }]);
+            const lastUserMsg = messagesRef.current.filter(m => m.sender === "user").slice(-1)[0];
+            if (lastUserMsg && wantsTextOutput(lastUserMsg.text)) {
+              setTextCard({ text: processed });
+            }
+          } else {
+            setMessages((prev) => [...prev, { id: Date.now().toString() + "-" + sender, sender, text }]);
+            if (detectWohLadki(text)) {
+              setWohLadkiMentions(prev => {
+                const n = prev + 1;
+                setJealousyLevel(Math.min(100, n * 15));
+                return n;
+              });
+            }
           }
         };
 
         session.onCommand = (url) => {
           setTextCard({ text: "Tap below if it didn't open automatically.", url });
           openUrl(url);
+        };
+
+        session.onJealousy = () => {
+          setWohLadkiMentions(prev => {
+            const n = prev + 1;
+            setJealousyLevel(Math.min(100, n * 15));
+            return n;
+          });
+          setMood("Moody");
         };
 
         await session.start();
@@ -229,18 +342,31 @@ export default function App() {
     setShowTextInput(false);
   };
 
+  // Mood label display
+  const moodLabels: Record<Mood, string> = {
+    Normal: "😊 Normal",
+    Moody: "😤 Moody",
+    Soft: "🥺 Soft",
+    Night: "🌙 Night Mode",
+  };
+
   return (
-    <div className="h-[100dvh] w-screen bg-[#050505] text-white flex flex-col items-center justify-between font-sans relative overflow-hidden m-0 p-0">
+    <div className="h-[100dvh] w-screen bg-[#050508] text-white flex flex-col items-center justify-between font-sans relative overflow-hidden m-0 p-0">
       {showPermissionModal && <PermissionModal onClose={() => setShowPermissionModal(false)} />}
 
-      {/* Vanta.js animated background */}
-      <VantaBackground effect="WAVES" />
+      {/* Vanta.js animated background — passes ref for mood color changes */}
+      <VantaBackground effect="WAVES" onVantaReady={(effect) => { vantaRef.current = effect; }} />
+
+      {/* Jealousy Meter */}
+      <JealousyMeter level={jealousyLevel} wohLadkiMentions={wohLadkiMentions} />
 
       {/* Header */}
       <header className="absolute top-0 left-0 w-full flex justify-between items-center z-20 px-6 py-4 md:px-12 md:py-6">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-rose-400 flex items-center justify-center font-bold text-sm">N</div>
           <h1 className="text-xl font-serif font-medium tracking-wide opacity-90">Naina</h1>
+          {/* Mood badge */}
+          <span className="text-[10px] opacity-40 ml-1 tracking-wider">{moodLabels[mood]}</span>
         </div>
         <button
           onClick={() => setIsMuted(!isMuted)}
@@ -284,7 +410,7 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      {/* Text Card — only appears when user asks for text OR for URL actions */}
+      {/* Text Card */}
       <AnimatePresence>
         {textCard && (
           <motion.div
@@ -326,7 +452,7 @@ export default function App() {
             >
               <input
                 type="text" value={textInput} onChange={(e) => setTextInput(e.target.value)}
-                placeholder="Type to Zoya..." autoFocus
+                placeholder="Type to Naina..." autoFocus
                 className="flex-1 bg-transparent border-none outline-none text-white placeholder:text-white/30 text-sm"
               />
               <button type="submit" disabled={!textInput.trim()}

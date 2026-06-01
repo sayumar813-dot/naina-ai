@@ -57,6 +57,13 @@ function getApiKey(): string {
   keyIndex++;
   return key;
 }
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+function isRateLimit(error: any): boolean {
+  const msg = String(error?.message || error || '').toLowerCase();
+  return msg.includes('429') || msg.includes('quota') || msg.includes('rate') || msg.includes('resource_exhausted');
+}
 // ────────────────────────────────────────────────────────────────────────────
 
 let chatSession: any = null;
@@ -294,29 +301,57 @@ export async function getZoyaResponse(prompt: string, history: { sender: "user" 
 
     return response.text || "Ugh, fine. I have nothing to say.";
   } catch (error) {
+    if (isRateLimit(error)) {
+      // Rate limited — try next key after a short wait
+      console.warn('Rate limited, rotating key and retrying...');
+      await sleep(1500);
+      try {
+        chatSession = null; // force new session with next key
+        const ai2 = new GoogleGenAI({ apiKey: getApiKey() });
+        chatSession = ai2.chats.create({
+          model: 'gemini-3.1-flash-lite-preview',
+          config: { systemInstruction },
+          history: [],
+        });
+        const retryResp = await chatSession.sendMessage({ message: prompt });
+        return retryResp.text || "Haan bolo.";
+      } catch (retryErr) {
+        console.error('Retry also failed:', retryErr);
+        return "Abhi thoda busy hoon. Ek second baad try karo.";
+      }
+    }
     console.error("Gemini Error:", error);
-    return "Uff, mera dimaag kharab ho gaya hai. Try again later, Umar.";
+    return "Uff, kuch toh gadbad hai. Dobara try karo.";
   }
 }
 
 export async function getZoyaAudio(text: string): Promise<string | null> {
-  try {
-    const ai = new GoogleGenAI({ apiKey: getApiKey() });
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Kore" },
+  const maxAttempts = API_KEYS.length;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: getApiKey() });
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text }] }],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: "Kore" },
+            },
           },
         },
-      },
-    });
-    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
-  } catch (error) {
-    console.error("TTS Error:", error);
-    return null;
+      });
+      return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    } catch (error) {
+      if (isRateLimit(error) && attempt < maxAttempts - 1) {
+        console.warn(`TTS rate limited on attempt ${attempt + 1}, trying next key...`);
+        await sleep(1000 * (attempt + 1)); // backoff: 1s, 2s, 3s
+        continue;
+      }
+      console.error("TTS Error:", error);
+      return null;
+    }
   }
+  return null;
 }

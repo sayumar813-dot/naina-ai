@@ -12,9 +12,10 @@ type VantaEffect = "NET" | "WAVES" | "FOG" | "RINGS";
 
 interface VantaBackgroundProps {
   effect?: VantaEffect;
+  onVantaReady?: (effect: any) => void;
 }
 
-export default function VantaBackground({ effect = "NET" }: VantaBackgroundProps) {
+export default function VantaBackground({ effect = "NET", onVantaReady }: VantaBackgroundProps) {
   const vantaRef = useRef<HTMLDivElement>(null);
   const vantaEffect = useRef<any>(null);
 
@@ -94,6 +95,11 @@ export default function VantaBackground({ effect = "NET" }: VantaBackgroundProps
           backgroundColor: 0x050508,
           color: 0x6366f1,
         });
+      }
+
+      // Expose the effect instance so parent can change colors on mood change
+      if (vantaEffect.current && onVantaReady) {
+        onVantaReady(vantaEffect.current);
       }
     };
 

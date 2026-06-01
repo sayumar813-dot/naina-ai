@@ -431,13 +431,31 @@ export class LiveSessionManager {
               }
             }
           },
-          onclose: () => {
-            console.log("Live API Closed");
-            this.stop();
+          onclose: (event: any) => {
+            console.log("Live API Closed", event);
+            // Only auto-reconnect if session was active (not user-closed)
+            if (this.sessionPromise !== null) {
+              console.warn("Session dropped unexpectedly — attempting reconnect...");
+              this.sessionPromise = null;
+              this.onStateChange("processing");
+              setTimeout(() => {
+                if (this.mediaStream) {
+                  // Reconnect with fresh key
+                  this.ai = new GoogleGenAI({ apiKey: getLiveApiKey() });
+                  this.start().catch(() => {
+                    this.stop();
+                  });
+                } else {
+                  this.stop();
+                }
+              }, 2000);
+            } else {
+              this.stop();
+            }
           },
-          onerror: (err) => {
+          onerror: (err: any) => {
             console.error("Live API Error:", err);
-            this.stop();
+            // Don't stop — let onclose handle reconnect
           }
         }
       });
@@ -501,29 +519,23 @@ export class LiveSessionManager {
 
   stop() {
     this.stopHeartbeat();
-    if (this.processor) {
-      this.processor.disconnect();
-      this.processor = null;
-    }
-    if (this.source) {
-      this.source.disconnect();
-      this.source = null;
-    }
+    // Mark null FIRST so auto-reconnect logic knows this is intentional
+    const sessionToClose = this.sessionPromise;
+    this.sessionPromise = null;
+
+    if (this.processor) { this.processor.disconnect(); this.processor = null; }
+    if (this.source) { this.source.disconnect(); this.source = null; }
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach(t => t.stop());
       this.mediaStream = null;
     }
-    if (this.audioContext) {
-      this.audioContext.close();
-      this.audioContext = null;
-    }
+    if (this.audioContext) { this.audioContext.close(); this.audioContext = null; }
     this.stopPlayback();
-    
-    if (this.sessionPromise) {
-      this.sessionPromise.then(session => session.close()).catch(() => {});
-      this.sessionPromise = null;
+
+    if (sessionToClose) {
+      sessionToClose.then(session => session.close()).catch(() => {});
     }
-    
+
     this.onStateChange("idle");
   }
 
