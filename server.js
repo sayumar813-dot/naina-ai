@@ -15,16 +15,24 @@ const PORT = process.env.PORT || 5001; // Runs locally on port 5001
 
 app.use(express.json());
 
-// Vanilla CORS Middleware
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  'http://localhost:3000',
+  'http://localhost:5173',
+].filter(Boolean);
+
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  const origin = req.headers.origin;
+  if (!origin || allowedOrigins.includes(origin) || allowedOrigins.length === 0) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
   }
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, x-agent-token');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
+
 
 // Helper function to execute PowerShell commands
 function runPowerShell(command) {
@@ -310,6 +318,76 @@ app.post('/api/system-control', async (req, res) => {
   }
 });
 
+// ─── Weather API (free, no key needed) ──────────────────────────────────────
+app.get('/api/weather', async (req, res) => {
+  const city = req.query.city || 'Multan';
+  try {
+    const response = await axios.get(`https://wttr.in/${encodeURIComponent(city)}?format=j1`, { timeout: 6000 });
+    const current = response.data.current_condition[0];
+    res.json({
+      city,
+      temp_c: current.temp_C,
+      temp_f: current.temp_F,
+      description: current.weatherDesc[0].value,
+      humidity: current.humidity,
+      feels_like: current.FeelsLikeC,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Weather unavailable right now.' });
+  }
+});
+
+// ─── Local Agent Proxy (forwards to naina-agent running on laptop) ───────────
+const LOCAL_AGENT_URL = process.env.LOCAL_AGENT_URL;
+const LOCAL_AGENT_TOKEN = process.env.LOCAL_AGENT_TOKEN;
+
+async function callAgent(endpoint, data = {}, method = 'POST') {
+  if (!LOCAL_AGENT_URL) throw new Error('Local agent not configured');
+  const res = await axios({
+    url: `${LOCAL_AGENT_URL}${endpoint}`,
+    method,
+    headers: { 'Content-Type': 'application/json', 'x-agent-token': LOCAL_AGENT_TOKEN },
+    data: method !== 'GET' ? data : undefined,
+    timeout: 8000,
+  });
+  return res.data;
+}
+
+app.get('/api/agent/status', async (req, res) => {
+  try {
+    const status = await callAgent('/health', {}, 'GET');
+    res.json({ online: true, ...status });
+  } catch (e) {
+    res.json({ online: false });
+  }
+});
+
+app.post('/api/agent/volume', async (req, res) => {
+  try { res.json(await callAgent('/volume', req.body)); }
+  catch (e) { res.status(503).json({ error: 'Local agent offline. Run node agent.js on your laptop.' }); }
+});
+
+app.post('/api/agent/screenshot', async (req, res) => {
+  try { res.json(await callAgent('/screenshot', {}, 'POST')); }
+  catch (e) { res.status(503).json({ error: 'Local agent offline.' }); }
+});
+
+app.post('/api/agent/type', async (req, res) => {
+  try { res.json(await callAgent('/type', req.body)); }
+  catch (e) { res.status(503).json({ error: 'Local agent offline.' }); }
+});
+
+app.post('/api/agent/open', async (req, res) => {
+  try { res.json(await callAgent('/open', req.body)); }
+  catch (e) { res.status(503).json({ error: 'Local agent offline.' }); }
+});
+
+app.get('/api/agent/emails', async (req, res) => {
+  try { res.json(await callAgent(`/emails?count=${req.query.count || 5}`, {}, 'GET')); }
+  catch (e) { res.status(503).json({ error: 'Local agent offline or Gmail not configured.' }); }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.listen(PORT, () => {
-  console.log(`Local Naina System Control Server running at http://localhost:${PORT}`);
+  console.log(`Naina backend running on port ${PORT}`);
 });
